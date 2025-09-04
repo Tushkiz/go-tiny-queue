@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/tushkiz/go-tiny-queue/internal/metrics"
 	"github.com/tushkiz/go-tiny-queue/internal/queue"
 	"github.com/tushkiz/go-tiny-queue/internal/worker"
 )
@@ -27,6 +28,13 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	stopMetrics := metrics.Every(10*time.Second, func() {
+		s := metrics.Default.Snapshot()
+		fmt.Printf("metrics: leased=%d completed=%d failed=%d rescheduled=%d\n",
+			s.Leased, s.Completed, s.Failed, s.Rescheduled)
+	})
+	defer stopMetrics()
 
 	fmt.Println("worker: starting, visibility timeout =", vis)
 
@@ -52,6 +60,8 @@ func main() {
 			continue
 		}
 
+		metrics.Default.IncLeased()
+
 		fmt.Printf(
 			"worker leased task:\n"+
 				"  id          = %s\n"+
@@ -76,7 +86,13 @@ func main() {
 			// unkown type: no handlers, reschedule with error
 			close(done)
 			<-stopped
-			_, _ = store.FailAndReschedule(ctx, t.ID, baseBackoff, "no handlers registered for type "+t.Type)
+
+			metrics.Default.IncFailed()
+			dead, _ := store.FailAndReschedule(ctx, t.ID, baseBackoff, "no handlers registered for type "+t.Type)
+			if !dead {
+				metrics.Default.IncRescheduled()
+			}
+
 			fmt.Println("worker: no handler for type, reschedule task id=", t.ID)
 			continue
 		}
@@ -94,6 +110,7 @@ func main() {
 
 		if err != nil {
 			// Fail and reschedule with backoff
+			metrics.Default.IncFailed()
 			dead, ferr := store.FailAndReschedule(ctx, t.ID, baseBackoff, err.Error())
 			if ferr != nil {
 				fmt.Println("worker: fail/reschedule error: ", ferr)
@@ -102,6 +119,7 @@ func main() {
 			if dead {
 				fmt.Printf("worker: task moved to DLQ id=%s\n", t.ID)
 			} else {
+				metrics.Default.IncRescheduled()
 				fmt.Printf("worker: task failed; rescheduled id=%s\n", t.ID)
 			}
 			continue
@@ -111,6 +129,7 @@ func main() {
 			fmt.Println("worker: complete error:", err)
 			continue
 		}
+		metrics.Default.IncCompleted()
 
 		fmt.Printf("worker: completed task id=%s\n", t.ID)
 	}
