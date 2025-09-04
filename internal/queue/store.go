@@ -2,14 +2,18 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 type Store struct {
@@ -17,7 +21,18 @@ type Store struct {
 }
 
 func NewStore(dsn string) (*Store, error) {
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	// Configure a quiet logger that ignores record-not-found and only logs errors.
+	gormLogger := logger.New(
+		log.New(os.Stdout, "", log.LstdFlags),
+		logger.Config{
+			SlowThreshold:             time.Second,
+			LogLevel:                  logger.Error,
+			IgnoreRecordNotFoundError: true,
+			Colorful:                  true,
+		},
+	)
+
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{Logger: gormLogger})
 	if err != nil {
 		return nil, err
 	}
@@ -31,7 +46,7 @@ func (s *Store) Enqueue(ctx context.Context, taskType string, payload any, opts 
 	cfg := enqueueConfig{
 		Priority:       0,
 		MaxAttempts:    5,
-		NextRunAt:      time.Now(),
+		NextRunAt:      time.Now().UTC(),
 		IdempotencyKey: nil,
 	}
 	for _, opt := range opts {
@@ -64,8 +79,8 @@ func (s *Store) Enqueue(ctx context.Context, taskType string, payload any, opts 
 		IdempotencyKey: cfg.IdempotencyKey,
 		LeaseExpiresAt: nil,
 		NextRunAt:      cfg.NextRunAt,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
 	}
 
 	// Insert with ON CONFLICT DO NOTHING
@@ -117,4 +132,89 @@ func WithMaxAttempts(n int) EnqueueOption {
 
 func WithIdempotencyKey(k string) EnqueueOption {
 	return func(ec *enqueueConfig) { ec.IdempotencyKey = &k }
+}
+
+// FetchAndLease finds one due task and leases it by setting status=in_flight
+// attempt=attempt+1, lease_expires_at = now + visibilityTimeout.
+func (s *Store) FetchAndLease(ctx context.Context, visibilityTimeout time.Duration) (*Task, error) {
+	tx := s.DB.WithContext(ctx).Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			_ = tx.Rollback()
+			panic(r)
+		}
+	}()
+
+	var t Task
+	// Lock due, unleased or expired lease tasks
+
+	err := tx.
+		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		Where("status = ? AND next_run_at <= NOW(6) AND (lease_expires_at IS NULL OR lease_expires_at <= NOW(6))", StatusPending).
+		Order("priority DESC, next_run_at ASC, id ASC").
+		Limit(1).
+		Take(&t).Error
+
+	if err != nil {
+		_ = tx.Rollback()
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, err
+	}
+
+	newLease := time.Now().UTC().Add(visibilityTimeout)
+	now := time.Now().UTC()
+	// Update the selected row to mark as in-flight and set lease
+	if err := tx.Model(&Task{}).Where("id = ?", t.ID).Updates(map[string]any{
+		"status":           StatusInFlight,
+		"attempt":          gorm.Expr("attempt + 1"),
+		"lease_expires_at": newLease,
+		"updated_at":       now,
+	}).Error; err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, err
+	}
+
+	// Reflect changes in returned struct
+	t.Status = StatusInFlight
+	t.Attempt += 1
+	t.LeaseExpiresAt = &newLease
+	t.UpdatedAt = now
+
+	return &t, nil
+}
+
+// CompleteTask marks a task as completed and clears the lease
+func (s *Store) CompleteTask(ctx context.Context, id string) error {
+	now := time.Now().UTC()
+	return s.DB.WithContext(ctx).Model(&Task{}).Where("id = ?", id).Updates(map[string]any{
+		"status":           StatusCompleted,
+		"lease_expires_at": nil,
+		"updated_at":       now,
+	}).Error
+}
+
+// ExtendLease attempts to extend lease if the current lease matches
+// Returns true if extended, false if not
+func (s *Store) ExtendLease(ctx context.Context, id string, currentLease time.Time, extendBy time.Duration) (bool, error) {
+	newLease := time.Now().UTC().Add(extendBy)
+
+	res := s.DB.WithContext(ctx).Model(&Task{}).Where("id = ? AND status = ? AND lease_expires_at = ?", id, StatusInFlight, currentLease).Updates(map[string]any{
+		"lease_expires_at": newLease,
+		"updated_at":       time.Now(),
+	})
+
+	if res.Error != nil {
+		return false, res.Error
+	}
+
+	return res.RowsAffected == 1, nil
 }
