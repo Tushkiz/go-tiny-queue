@@ -3,6 +3,7 @@ module github.com/tushkiz/go-tiny-queue
 go 1.25.1
 
 require (
+	github.com/google/uuid v1.6.0
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/gorm v1.30.2
 )
