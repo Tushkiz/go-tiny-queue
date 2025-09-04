@@ -218,3 +218,88 @@ func (s *Store) ExtendLease(ctx context.Context, id string, currentLease time.Ti
 
 	return res.RowsAffected == 1, nil
 }
+
+// FailAndReschedule sets status back to pending with an increased next_run_at using
+// expenential backoff and optional jitter. If attempts >= max_attempts after increment,
+// the task is marked dead and not rescheduled
+func (s *Store) FailAndReschedule(ctx context.Context, id string, baseBackoff time.Duration, errMsg string) (dead bool, err error) {
+	tx := s.DB.WithContext(ctx).Begin()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			_ = tx.Rollback()
+			panic(r)
+		}
+	}()
+
+	var t Task
+
+	// fetch with UPDATE lock to avoid races
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&t).Error; err != nil {
+		_ = tx.Rollback()
+
+		return false, err
+	}
+
+	now := time.Now().UTC()
+	// attempt was already incremented when leased, we inspect it now to compute backoff
+	nextAttempt := t.Attempt
+	if nextAttempt >= t.MaxAttempts {
+		// Move to DLQ, mark as dead and do not reschedule
+		if err := tx.Model(&Task{}).Where("id = ?", id).Updates(map[string]any{
+			"status":           StatusDead,
+			"last_error":       errMsg,
+			"lease_expires_at": nil,
+			"updated_at":       now,
+		}).Error; err != nil {
+			_ = tx.Rollback()
+			return false, err
+		}
+		if err := tx.Commit().Error; err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	// Compute backoff: base * 2^(attempt - 1) with small jitter
+	delay := BackoffWithJitter(baseBackoff, nextAttempt)
+
+	if err := tx.Model(&Task{}).Where("id = ?", id).Updates(map[string]any{
+		"status":           StatusPending,
+		"last_error":       errMsg,
+		"lease_expires_at": nil,
+		"next_run_at":      now.Add(delay).UTC(),
+		"updated_at":       now,
+	}).Error; err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// BackoffWithJitter computes exponential backoff based on the attempt number.
+// attempt is 1-based
+func BackoffWithJitter(base time.Duration, attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+
+	// base * 2^(attempt - 1)
+	delay := base << (attempt - 1)
+	// apply jitter +/-10%
+	jitterFrac := 0.10
+	nowNs := time.Now().UTC().UnixNano()
+	// pseudo-random but deterministic-enough without math/rand seeding
+	sign := int64(1)
+	if nowNs&1 == 0 {
+		sign = -1
+	}
+	jitter := time.Duration(float64(delay) * jitterFrac)
+	return delay + time.Duration(sign)*jitter/2
+}

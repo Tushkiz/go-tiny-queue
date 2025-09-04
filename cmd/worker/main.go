@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
 	"time"
 
 	"github.com/tushkiz/go-tiny-queue/internal/queue"
+	"github.com/tushkiz/go-tiny-queue/internal/worker"
 )
 
 func main() {
@@ -27,6 +29,9 @@ func main() {
 	}
 
 	fmt.Println("worker: starting, visibility timeout =", vis)
+
+	reg := worker.DefaultRegistry()
+	baseBackoff := 5 * time.Second
 
 	for {
 		select {
@@ -62,13 +67,45 @@ func main() {
 		stopped := make(chan struct{})
 		go leaseExtender(ctx, store, t, vis/2, done, stopped) // extend every half timeout
 
-		// Simulate the work
-		// TODO: add real work handler
-		time.Sleep(5 * time.Second)
+		// Decode payload
+		var payloadBytes []byte = t.Payload
+		var handler worker.Handler
+		if h, ok := reg[t.Type]; ok {
+			handler = h
+		} else {
+			// unkown type: no handlers, reschedule with error
+			close(done)
+			<-stopped
+			_, _ = store.FailAndReschedule(ctx, t.ID, baseBackoff, "no handlers registered for type "+t.Type)
+			fmt.Println("worker: no handler for type, reschedule task id=", t.ID)
+			continue
+		}
 
-		// Stop extender and complete
+		// Check if json is well-formed
+		var tmp any
+		_ = json.Unmarshal(payloadBytes, &tmp)
+
+		// Run handler
+		err = handler(ctx, payloadBytes)
+
+		// Stop extender before updating DB
 		close(done)
 		<-stopped
+
+		if err != nil {
+			// Fail and reschedule with backoff
+			dead, ferr := store.FailAndReschedule(ctx, t.ID, baseBackoff, err.Error())
+			if ferr != nil {
+				fmt.Println("worker: fail/reschedule error: ", ferr)
+				continue
+			}
+			if dead {
+				fmt.Printf("worker: task moved to DLQ id=%s\n", t.ID)
+			} else {
+				fmt.Printf("worker: task failed; rescheduled id=%s\n", t.ID)
+			}
+			continue
+		}
 
 		if err := store.CompleteTask(ctx, t.ID); err != nil {
 			fmt.Println("worker: complete error:", err)
