@@ -1,0 +1,23 @@
+services:
+  db:
+    image: mysql:8
+    container_name: go-tiny-queue-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: tiny-queue
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "app", "-papp"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  db_data:  
+      
+    

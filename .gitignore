@@ -1,0 +1,32 @@
+
+# Binaries
+/bin/
+/dist/
+/build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# temp dir
+tmp/
+
+# db data
+db_data/
+
+# Go modules vendor
+vendor/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Env files
+.env
+.env.*
