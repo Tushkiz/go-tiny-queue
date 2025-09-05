@@ -9,13 +9,14 @@ import (
 	"time"
 
 	"github.com/tushkiz/go-tiny-queue/internal/queue"
+	"github.com/tushkiz/go-tiny-queue/internal/util"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	dsn := getenv("DB_DSN", "app:app@tcp(127.0.0.1:3306)/tiny-queue?parseTime=true&charset=utf8mb4&loc=UTC")
+	dsn := util.Getenv("DB_DSN", "app:app@tcp(127.0.0.1:3306)/tiny-queue?parseTime=true&charset=utf8mb4&loc=UTC")
 	store, err := queue.NewStore(dsn)
 	if err != nil {
 		log.Fatalf("monitor: store init error: %v", err)
@@ -30,7 +31,7 @@ func main() {
 func runTUI(ctx context.Context, store *queue.Store) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	staleAfterStr := getenv("WORKER_STALE_AFTER", "60s")
+	staleAfterStr := util.Getenv("WORKER_STALE_AFTER", "60s")
 	staleAfter, _ := time.ParseDuration(staleAfterStr)
 
 	for {
@@ -133,11 +134,4 @@ func listWorkers(ctx context.Context, store *queue.Store) ([]workerRow, error) {
 		return nil, err
 	}
 	return rows, nil
-}
-
-func getenv(key string, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }

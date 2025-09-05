@@ -8,11 +8,12 @@ import (
 	"os"
 
 	"github.com/tushkiz/go-tiny-queue/internal/queue"
+	"github.com/tushkiz/go-tiny-queue/internal/util"
 )
 
 func main() {
 	ctx := context.Background()
-	dsn := getenv("DB_DSN", "app:app@tcp(127.0.0.1:3306)/tiny-queue?parseTime=true&charset=utf8mb4&loc=UTC")
+	dsn := util.Getenv("DB_DSN", "app:app@tcp(127.0.0.1:3306)/tiny-queue?parseTime=true&charset=utf8mb4&loc=UTC")
 	store, err := queue.NewStore(dsn)
 	if err != nil {
 		panic(err)
@@ -62,11 +63,4 @@ func main() {
 		t.Status,
 		t.NextRunAt,
 	)
-}
-
-func getenv(key string, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tushkiz/go-tiny-queue/internal/metrics"
 	"github.com/tushkiz/go-tiny-queue/internal/queue"
+	"github.com/tushkiz/go-tiny-queue/internal/util"
 	"github.com/tushkiz/go-tiny-queue/internal/worker"
 )
 
@@ -18,24 +19,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	dsn := getenv("DB_DSN", "app:app@tcp(127.0.0.1:3306)/tiny-queue?parseTime=true&charset=utf8mb4&loc=UTC")
-	visStr := getenv("QUEUE_VISIBILITY_TIMEOUT", "30s")
+	dsn := util.Getenv("DB_DSN", "app:app@tcp(127.0.0.1:3306)/tiny-queue?parseTime=true&charset=utf8mb4&loc=UTC")
+	visStr := util.Getenv("QUEUE_VISIBILITY_TIMEOUT", "30s")
 	vis, err := time.ParseDuration(visStr)
 	if err != nil {
 		panic(err)
 	}
 
-	heartbeatStr := getenv("WORKER_HEARTBEAT_INTERVAL", "5s")
+	heartbeatStr := util.Getenv("WORKER_HEARTBEAT_INTERVAL", "5s")
 	heartbeatEvery, err := time.ParseDuration(heartbeatStr)
 	if err != nil {
 		panic(err)
 	}
-	staleStr := getenv("WORKER_STALE_AFTER", "60s")
+	staleStr := util.Getenv("WORKER_STALE_AFTER", "60s")
 	staleAfter, err := time.ParseDuration(staleStr)
 	if err != nil {
 		panic(err)
 	}
-	reclaimStr := getenv("WORKER_RECLAIM_EVERY", "10s")
+	reclaimStr := util.Getenv("WORKER_RECLAIM_EVERY", "10s")
 	reclaimEvery, err := time.ParseDuration(reclaimStr)
 	if err != nil {
 		panic(err)
@@ -240,11 +241,4 @@ func startReclaimer(ctx context.Context, store *queue.Store, staleAfter, every t
 		}
 	}()
 	return cancel
-}
-
-func getenv(key string, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }
