@@ -303,3 +303,19 @@ func BackoffWithJitter(base time.Duration, attempt int) time.Duration {
 	jitter := time.Duration(float64(delay) * jitterFrac)
 	return delay + time.Duration(sign)*jitter/2
 }
+
+// ListTasks returns tasks filtered by status ("", "all" for no filter) up to the given limit.
+func (s *Store) ListTasks(ctx context.Context, status string, limit int) ([]Task, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	q := s.DB.WithContext(ctx).Model(&Task{})
+	if status != "" && status != "all" {
+		q = q.Where("status = ?", status)
+	}
+	var tasks []Task
+	if err := q.Order("updated_at DESC").Limit(limit).Find(&tasks).Error; err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
