@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/tushkiz/go-tiny-queue/internal/metrics"
 	"github.com/tushkiz/go-tiny-queue/internal/queue"
 	"github.com/tushkiz/go-tiny-queue/internal/worker"
@@ -24,6 +25,22 @@ func main() {
 		panic(err)
 	}
 
+	heartbeatStr := getenv("WORKER_HEARTBEAT_INTERVAL", "5s")
+	heartbeatEvery, err := time.ParseDuration(heartbeatStr)
+	if err != nil {
+		panic(err)
+	}
+	staleStr := getenv("WORKER_STALE_AFTER", "60s")
+	staleAfter, err := time.ParseDuration(staleStr)
+	if err != nil {
+		panic(err)
+	}
+	reclaimStr := getenv("WORKER_RECLAIM_EVERY", "10s")
+	reclaimEvery, err := time.ParseDuration(reclaimStr)
+	if err != nil {
+		panic(err)
+	}
+
 	store, err := queue.NewStore(dsn)
 	if err != nil {
 		panic(err)
@@ -36,7 +53,19 @@ func main() {
 	})
 	defer stopMetrics()
 
-	fmt.Println("worker: starting, visibility timeout =", vis)
+	// Register worker and start heartbeats
+	workerID := uuid.NewString()
+	if err := store.RegisterWorker(ctx, workerID); err != nil {
+		panic(fmt.Errorf("worker: register error: %w", err))
+	}
+	stopHB := startHeartbeat(ctx, store, workerID, heartbeatEvery)
+	defer stopHB()
+
+	// Start reclaimer loop
+	stopReclaimer := startReclaimer(ctx, store, staleAfter, reclaimEvery)
+	defer stopReclaimer()
+
+	fmt.Println("worker: starting, visibility timeout =", vis, "workerID=", workerID)
 
 	reg := worker.DefaultRegistry()
 	baseBackoff := 5 * time.Second
@@ -49,7 +78,7 @@ func main() {
 		default:
 		}
 
-		t, err := store.FetchAndLease(ctx, vis)
+		t, err := store.FetchAndLease(ctx, workerID, vis)
 		if err != nil {
 			// error or no task available
 			time.Sleep(1 * time.Second)
@@ -175,6 +204,42 @@ func leaseExtender(ctx context.Context, store *queue.Store, t *queue.Task, inter
 			}
 		}
 	}
+}
+
+func startHeartbeat(ctx context.Context, store *queue.Store, workerID string, every time.Duration) func() {
+	ctxHB, cancel := context.WithCancel(ctx)
+	go func() {
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctxHB.Done():
+				return
+			case <-ticker.C:
+				_ = store.HeartbeatWorker(ctxHB, workerID)
+			}
+		}
+	}()
+	return cancel
+}
+
+func startReclaimer(ctx context.Context, store *queue.Store, staleAfter, every time.Duration) func() {
+	ctxRec, cancel := context.WithCancel(ctx)
+	go func() {
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctxRec.Done():
+				return
+			case <-ticker.C:
+				if n, err := store.ReclaimExpiredFromStaleWorkers(ctxRec, staleAfter, 200); err == nil && n > 0 {
+					fmt.Printf("worker: reclaimed %d tasks from stale workers\n", n)
+				}
+			}
+		}
+	}()
+	return cancel
 }
 
 func getenv(key string, defaultValue string) string {

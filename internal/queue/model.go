@@ -24,6 +24,19 @@ type Task struct {
 	NextRunAt      time.Time  `gorm:"type:datetime(6);not null;index"`
 	CreatedAt      time.Time  `gorm:"type:datetime(6);not null"`
 	UpdatedAt      time.Time  `gorm:"type:datetime(6);not null"`
+
+	// Worker ownership
+	WorkerID *string `gorm:"type:varchar(36);index"`
+	Worker   *Worker `gorm:"foreignKey:ID;references:WorkerID"`
 }
 
 func (Task) TableName() string { return "tasks" }
+
+type Worker struct {
+	ID         string    `gorm:"primaryKey;type:char(36)"`
+	LastSeenAt time.Time `gorm:"type:datetime(6);not null"`
+	CreatedAt  time.Time `gorm:"type:datetime(6);not null"`
+	UpdatedAt  time.Time `gorm:"type:datetime(6);not null"`
+}
+
+func (Worker) TableName() string { return "workers" }

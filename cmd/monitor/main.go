@@ -30,6 +30,9 @@ func main() {
 func runTUI(ctx context.Context, store *queue.Store) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+	staleAfterStr := getenv("WORKER_STALE_AFTER", "60s")
+	staleAfter, _ := time.ParseDuration(staleAfterStr)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -54,6 +57,29 @@ func runTUI(ctx context.Context, store *queue.Store) {
 			fmt.Printf("Dead (DLQ)         : %d\n", dead)
 			fmt.Println()
 			fmt.Println("* Failed: pending with last_error; Rescheduled: pending with attempt>0")
+			fmt.Println()
+
+			// Workers section
+			ws, err := listWorkers(ctx, store)
+			if err != nil {
+				fmt.Println("workers error:", err)
+			} else {
+				fmt.Println("Workers (last_seen_at UTC):")
+				if len(ws) == 0 {
+					fmt.Println("  (none)")
+				} else {
+					now := time.Now().UTC()
+					for _, w := range ws {
+						age := now.Sub(w.LastSeenAt)
+						status := "ok"
+						if age > staleAfter {
+							status = "STALE"
+						}
+						fmt.Printf("  %-36s  %s  (age %s)  [%s]\n", w.ID, w.LastSeenAt.UTC().Format(time.RFC3339Nano), age.Truncate(time.Millisecond), status)
+					}
+				}
+			}
+
 			fmt.Println()
 			fmt.Println("Press Ctrl-C to exit")
 		}
@@ -89,6 +115,24 @@ func countWhere(ctx context.Context, store *queue.Store, where string, args ...a
 	var n int64
 	err := store.DB.WithContext(ctx).Model(&queue.Task{}).Where(where, args...).Count(&n).Error
 	return n, err
+}
+
+type workerRow struct {
+	ID         string
+	LastSeenAt time.Time
+}
+
+func listWorkers(ctx context.Context, store *queue.Store) ([]workerRow, error) {
+	var rows []workerRow
+	if err := store.DB.
+		WithContext(ctx).
+		Table("workers").
+		Select("id, last_seen_at").
+		Order("last_seen_at DESC").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func getenv(key string, defaultValue string) string {

@@ -136,7 +136,7 @@ func WithIdempotencyKey(k string) EnqueueOption {
 
 // FetchAndLease finds one due task and leases it by setting status=in_flight
 // attempt=attempt+1, lease_expires_at = now + visibilityTimeout.
-func (s *Store) FetchAndLease(ctx context.Context, visibilityTimeout time.Duration) (*Task, error) {
+func (s *Store) FetchAndLease(ctx context.Context, workerID string, visibilityTimeout time.Duration) (*Task, error) {
 	tx := s.DB.WithContext(ctx).Begin()
 	if tx.Error != nil {
 		return nil, tx.Error
@@ -173,6 +173,7 @@ func (s *Store) FetchAndLease(ctx context.Context, visibilityTimeout time.Durati
 		"status":           StatusInFlight,
 		"attempt":          gorm.Expr("attempt + 1"),
 		"lease_expires_at": newLease,
+		"worker_id":        workerID,
 		"updated_at":       now,
 	}).Error; err != nil {
 		_ = tx.Rollback()
@@ -188,6 +189,7 @@ func (s *Store) FetchAndLease(ctx context.Context, visibilityTimeout time.Durati
 	t.Attempt += 1
 	t.LeaseExpiresAt = &newLease
 	t.UpdatedAt = now
+	t.WorkerID = &workerID
 
 	return &t, nil
 }
@@ -198,6 +200,7 @@ func (s *Store) CompleteTask(ctx context.Context, id string) error {
 	return s.DB.WithContext(ctx).Model(&Task{}).Where("id = ?", id).Updates(map[string]any{
 		"status":           StatusCompleted,
 		"lease_expires_at": nil,
+		"worker_id":        nil,
 		"updated_at":       now,
 	}).Error
 }
@@ -252,6 +255,7 @@ func (s *Store) FailAndReschedule(ctx context.Context, id string, baseBackoff ti
 			"status":           StatusDead,
 			"last_error":       errMsg,
 			"lease_expires_at": nil,
+			"worker_id":        nil,
 			"updated_at":       now,
 		}).Error; err != nil {
 			_ = tx.Rollback()
@@ -270,6 +274,7 @@ func (s *Store) FailAndReschedule(ctx context.Context, id string, baseBackoff ti
 		"status":           StatusPending,
 		"last_error":       errMsg,
 		"lease_expires_at": nil,
+		"worker_id":        nil,
 		"next_run_at":      now.Add(delay).UTC(),
 		"updated_at":       now,
 	}).Error; err != nil {
@@ -318,4 +323,70 @@ func (s *Store) ListTasks(ctx context.Context, status string, limit int) ([]Task
 		return nil, err
 	}
 	return tasks, nil
+}
+
+// RegisterWorker registers a worker and returns its ID
+func (s *Store) RegisterWorker(ctx context.Context, id string) error {
+	now := time.Now().UTC()
+	w := Worker{ID: id, LastSeenAt: now, CreatedAt: now, UpdatedAt: now}
+
+	return s.DB.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"last_seen_at": now,
+			"updated_at":   now,
+		}),
+	}).Create(&w).Error
+}
+
+func (s *Store) HeartbeatWorker(ctx context.Context, id string) error {
+	now := time.Now().UTC()
+	return s.DB.WithContext(ctx).Model(&Worker{}).Where("id = ?", id).Updates(map[string]any{
+		"last_seen_at": now,
+		"updated_at":   now,
+	}).Error
+}
+
+func (s *Store) ListWorkers(ctx context.Context, limit int) ([]Worker, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var workers []Worker
+	if err := s.DB.WithContext(ctx).Order("last_seen_at DESC").Limit(limit).Find(&workers).Error; err != nil {
+		return nil, err
+	}
+	return workers, nil
+}
+
+// ReclaimExpiredFromStaleWorkers moves tasks whose lease expired and whose workers are stale back to pending.
+func (s *Store) ReclaimExpiredFromStaleWorkers(ctx context.Context, staleAfter time.Duration, limit int) (int64, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	cutoff := time.Now().UTC().Add(-staleAfter)
+
+	// We reclaim only tasks that are assigned to a worker whose last_seen_at < cutoff
+	// and whose lease has expired. We clear worker_id and set next_run_at to NOW.
+	res := s.DB.WithContext(ctx).Exec(`
+        UPDATE tasks t
+        SET t.status = ?,
+            t.lease_expires_at = NULL,
+            t.worker_id = NULL,
+            t.updated_at = NOW(6),
+            t.next_run_at = NOW(6)
+        WHERE t.id IN (
+            SELECT id FROM (
+                SELECT t2.id
+                FROM tasks t2
+                JOIN workers w ON w.id = t2.worker_id
+                WHERE t2.status = ?
+                  AND t2.lease_expires_at IS NOT NULL
+                  AND t2.lease_expires_at <= NOW(6)
+                  AND w.last_seen_at < ?
+                LIMIT ?
+            ) AS limited
+        )
+    `, StatusPending, StatusInFlight, cutoff, limit)
+
+	return res.RowsAffected, res.Error
 }
