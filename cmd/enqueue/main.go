@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 
@@ -16,23 +18,34 @@ func main() {
 		panic(err)
 	}
 
-	// Example payload
-	email := "test@example.com"
-	taskType := "send_test_email"
-	payload := map[string]any{
-		"email":   email,
-		"subject": "Testing queue",
+	// Flags: -type <string> -payload '<json>'
+	var (
+		taskType   = flag.String("type", "", "task type (required)")
+		payloadStr = flag.String("payload", "", "payload as JSON string (required)")
+	)
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s -type <type> -payload '<json>'\n", os.Args[0])
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if *taskType == "" || *payloadStr == "" {
+		flag.Usage()
+		os.Exit(2)
 	}
 
-	idempotencyKey := email + "__" + taskType
+	// Parse payload JSON
+	var payload any
+	if err := json.Unmarshal([]byte(*payloadStr), &payload); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid payload JSON: %v\n", err)
+		os.Exit(2)
+	}
 
 	t, err := store.Enqueue(
 		ctx,
-		taskType,
+		*taskType,
 		payload,
 		queue.WithPriority(10),
 		queue.WithMaxAttempts(5),
-		queue.WithIdempotencyKey(idempotencyKey),
 	)
 	if err != nil {
 		panic(err)
