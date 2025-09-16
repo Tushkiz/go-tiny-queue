@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +20,21 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	// Determine which queues to consume from: -queues flag or WORKER_QUEUES env (comma-separated)
+	queuesFlag := flag.String("queues", "", "comma-separated queue names to consume (overrides WORKER_QUEUES)")
+	flag.Parse()
+	queuesStr := *queuesFlag
+	if queuesStr == "" {
+		queuesStr = util.Getenv("WORKER_QUEUES", "")
+	}
+	var queues []string
+	for _, part := range strings.Split(queuesStr, ",") {
+		q := strings.TrimSpace(part)
+		if q != "" {
+			queues = append(queues, q)
+		}
+	}
 
 	dsn := util.Getenv("DB_DSN", "app:app@tcp(127.0.0.1:3306)/tiny-queue?parseTime=true&charset=utf8mb4&loc=UTC")
 	visStr := util.Getenv("QUEUE_VISIBILITY_TIMEOUT", "30s")
@@ -79,7 +96,13 @@ func main() {
 		default:
 		}
 
-		t, err := store.FetchAndLease(ctx, workerID, vis)
+		var t *queue.Task
+		var err error
+		if len(queues) > 0 {
+			t, err = store.FetchAndLeaseFromQueues(ctx, workerID, vis, queues)
+		} else {
+			t, err = store.FetchAndLease(ctx, workerID, vis)
+		}
 		if err != nil {
 			// error or no task available
 			time.Sleep(1 * time.Second)

@@ -23,9 +23,10 @@ func main() {
 	var (
 		taskType   = flag.String("type", "", "task type (required)")
 		payloadStr = flag.String("payload", "", "payload as JSON string (required)")
+		queueName  = flag.String("queue", "default", "queue name to enqueue to")
 	)
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s -type <type> -payload '<json>'\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s -type <type> -payload '<json>' [-queue <name>]\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -47,6 +48,7 @@ func main() {
 		payload,
 		queue.WithPriority(10),
 		queue.WithMaxAttempts(5),
+		queue.WithQueueName(*queueName),
 	)
 	if err != nil {
 		panic(err)

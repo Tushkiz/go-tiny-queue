@@ -47,6 +47,7 @@ func (s *Store) Enqueue(ctx context.Context, taskType string, payload any, opts 
 		Priority:       0,
 		MaxAttempts:    5,
 		NextRunAt:      time.Now().UTC(),
+		QueueName:      "default",
 		IdempotencyKey: nil,
 	}
 	for _, opt := range opts {
@@ -70,6 +71,7 @@ func (s *Store) Enqueue(ctx context.Context, taskType string, payload any, opts 
 	t := &Task{
 		ID:             id,
 		Type:           taskType,
+		QueueName:      cfg.QueueName,
 		Payload:        payloadBytes,
 		Status:         StatusPending,
 		Priority:       cfg.Priority,
@@ -117,6 +119,7 @@ type enqueueConfig struct {
 	Priority       int
 	MaxAttempts    int
 	NextRunAt      time.Time
+	QueueName      string
 	IdempotencyKey *string
 }
 
@@ -132,6 +135,10 @@ func WithMaxAttempts(n int) EnqueueOption {
 
 func WithIdempotencyKey(k string) EnqueueOption {
 	return func(ec *enqueueConfig) { ec.IdempotencyKey = &k }
+}
+
+func WithQueueName(name string) EnqueueOption {
+	return func(ec *enqueueConfig) { ec.QueueName = name }
 }
 
 // FetchAndLease finds one due task and leases it by setting status=in_flight
@@ -154,6 +161,64 @@ func (s *Store) FetchAndLease(ctx context.Context, workerID string, visibilityTi
 	err := tx.
 		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 		Where("status = ? AND next_run_at <= NOW(6) AND (lease_expires_at IS NULL OR lease_expires_at <= NOW(6))", StatusPending).
+		Order("priority DESC, next_run_at ASC, id ASC").
+		Limit(1).
+		Take(&t).Error
+
+	if err != nil {
+		_ = tx.Rollback()
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, err
+	}
+
+	newLease := time.Now().UTC().Add(visibilityTimeout)
+	now := time.Now().UTC()
+	// Update the selected row to mark as in-flight and set lease
+	if err := tx.Model(&Task{}).Where("id = ?", t.ID).Updates(map[string]any{
+		"status":           StatusInFlight,
+		"attempt":          gorm.Expr("attempt + 1"),
+		"lease_expires_at": newLease,
+		"worker_id":        workerID,
+		"updated_at":       now,
+	}).Error; err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, err
+	}
+
+	// Reflect changes in returned struct
+	t.Status = StatusInFlight
+	t.Attempt += 1
+	t.LeaseExpiresAt = &newLease
+	t.UpdatedAt = now
+	t.WorkerID = &workerID
+
+	return &t, nil
+}
+
+// FetchAndLeaseFromQueues is like FetchAndLease but restricts selection to the given queue names.
+func (s *Store) FetchAndLeaseFromQueues(ctx context.Context, workerID string, visibilityTimeout time.Duration, queues []string) (*Task, error) {
+	tx := s.DB.WithContext(ctx).Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			_ = tx.Rollback()
+			panic(r)
+		}
+	}()
+
+	var t Task
+	// Lock due, unleased or expired lease tasks limited to the specified queues
+	err := tx.
+		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		Where("status = ? AND next_run_at <= NOW(6) AND (lease_expires_at IS NULL OR lease_expires_at <= NOW(6)) AND queue_name IN ?", StatusPending, queues).
 		Order("priority DESC, next_run_at ASC, id ASC").
 		Limit(1).
 		Take(&t).Error

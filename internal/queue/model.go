@@ -13,6 +13,7 @@ const (
 type Task struct {
 	ID             string     `gorm:"primaryKey;type:char(36)"`
 	Type           string     `gorm:"type:varchar(255);not null"`
+	QueueName      string     `gorm:"type:varchar(64);not null;default:'default';index"`
 	Payload        []byte     `gorm:"type:json;not null"`
 	Status         string     `gorm:"type:varchar(16);not null;default:'pending';index"`
 	Priority       int        `gorm:"type:int;not null;default:0;index"`
@@ -27,7 +28,7 @@ type Task struct {
 
 	// Worker ownership
 	WorkerID *string `gorm:"type:varchar(36);index"`
-	Worker   *Worker `gorm:"foreignKey:ID;references:WorkerID"`
+	Worker   *Worker `gorm:"foreignKey:WorkerID;references:ID"`
 }
 
 func (Task) TableName() string { return "tasks" }
