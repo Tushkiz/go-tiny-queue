@@ -294,6 +294,15 @@ func (s *Store) CancelTask(ctx context.Context, id string) error {
 	}).Error
 }
 
+// GetTask returns the task row for the given id
+func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
+	var t Task
+	if err := s.DB.WithContext(ctx).First(&t, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 // ExtendLease attempts to extend lease if the current lease matches
 // Returns true if extended, false if not
 func (s *Store) ExtendLease(ctx context.Context, id string, currentLease time.Time, extendBy time.Duration) (bool, error) {

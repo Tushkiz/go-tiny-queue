@@ -125,10 +125,11 @@ func main() {
 			t.Attempt,
 		)
 
-		// Start lease extender for long-running jobs
+		// Start lease extender for long-running jobs and task-level cancelation
 		done := make(chan struct{})
 		stopped := make(chan struct{})
-		go leaseExtender(ctx, store, t, vis/2, done, stopped) // extend every half timeout
+		taskCtx, taskCancel := context.WithCancel(ctx)
+		go leaseExtender(taskCtx, store, t, vis/2, done, stopped, taskCancel) // extend every half timeout and poll control flags
 
 		// Decode payload
 		var payloadBytes []byte = t.Payload
@@ -188,7 +189,7 @@ func main() {
 	}
 }
 
-func leaseExtender(ctx context.Context, store *queue.Store, t *queue.Task, interval time.Duration, done <-chan struct{}, stopped chan<- struct{}) {
+func leaseExtender(ctx context.Context, store *queue.Store, t *queue.Task, interval time.Duration, done <-chan struct{}, stopped chan<- struct{}, cancelTask context.CancelFunc) {
 	defer close(stopped)
 
 	if t.LeaseExpiresAt == nil {
@@ -211,6 +212,20 @@ func leaseExtender(ctx context.Context, store *queue.Store, t *queue.Task, inter
 			case <-done:
 				return
 			default:
+			}
+			// Poll control flags: if canceled or paused, stop extending and cancel task context
+			if latest, err := store.GetTask(ctx, t.ID); err == nil {
+				now := time.Now().UTC()
+				if latest.CanceledAt != nil {
+					fmt.Println("worker: cancel flag detected; stopping lease extender for", t.ID)
+					cancelTask()
+					return
+				}
+				if latest.PausedUntil != nil && latest.PausedUntil.After(now) {
+					fmt.Println("worker: pause flag detected; stopping lease extender for", t.ID)
+					cancelTask()
+					return
+				}
 			}
 			ok, err := store.ExtendLease(ctx, t.ID, lastLease, interval*2)
 			if err != nil {
@@ -248,20 +263,20 @@ func startHeartbeat(ctx context.Context, store *queue.Store, workerID string, ev
 }
 
 func startReclaimer(ctx context.Context, store *queue.Store, staleAfter, every time.Duration) func() {
-	ctxRec, cancel := context.WithCancel(ctx)
-	go func() {
-		ticker := time.NewTicker(every)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctxRec.Done():
-				return
-			case <-ticker.C:
-				if n, err := store.ReclaimExpiredFromStaleWorkers(ctxRec, staleAfter, 200); err == nil && n > 0 {
-					fmt.Printf("worker: reclaimed %d tasks from stale workers\n", n)
-				}
-			}
-		}
-	}()
-	return cancel
+    ctxRec, cancel := context.WithCancel(ctx)
+    go func() {
+        ticker := time.NewTicker(every)
+        defer ticker.Stop()
+        for {
+            select {
+            case <-ctxRec.Done():
+                return
+            case <-ticker.C:
+                if n, err := store.ReclaimExpiredFromStaleWorkers(ctxRec, staleAfter, 200); err == nil && n > 0 {
+                    fmt.Printf("worker: reclaimed %d tasks from stale workers\n", n)
+                }
+            }
+        }
+    }()
+    return cancel
 }
