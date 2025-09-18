@@ -23,6 +23,8 @@ type Task struct {
 	IdempotencyKey *string    `gorm:"type:varchar(128);uniqueIndex"`
 	LeaseExpiresAt *time.Time `gorm:"type:datetime(6);index"`
 	NextRunAt      time.Time  `gorm:"type:datetime(6);not null;index"`
+	PausedUntil    *time.Time `gorm:"type:datetime(6);index"`
+	CanceledAt     *time.Time `gorm:"type:datetime(6);index"`
 	CreatedAt      time.Time  `gorm:"type:datetime(6);not null"`
 	UpdatedAt      time.Time  `gorm:"type:datetime(6);not null"`
 

@@ -160,7 +160,7 @@ func (s *Store) FetchAndLease(ctx context.Context, workerID string, visibilityTi
 
 	err := tx.
 		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-		Where("status = ? AND next_run_at <= NOW(6) AND (lease_expires_at IS NULL OR lease_expires_at <= NOW(6))", StatusPending).
+		Where("status = ? AND next_run_at <= NOW(6) AND (lease_expires_at IS NULL OR lease_expires_at <= NOW(6)) AND (paused_until IS NULL OR paused_until <= NOW(6)) AND canceled_at IS NULL", StatusPending).
 		Order("priority DESC, next_run_at ASC, id ASC").
 		Limit(1).
 		Take(&t).Error
@@ -218,7 +218,7 @@ func (s *Store) FetchAndLeaseFromQueues(ctx context.Context, workerID string, vi
 	// Lock due, unleased or expired lease tasks limited to the specified queues
 	err := tx.
 		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-		Where("status = ? AND next_run_at <= NOW(6) AND (lease_expires_at IS NULL OR lease_expires_at <= NOW(6)) AND queue_name IN ?", StatusPending, queues).
+		Where("status = ? AND next_run_at <= NOW(6) AND (lease_expires_at IS NULL OR lease_expires_at <= NOW(6)) AND (paused_until IS NULL OR paused_until <= NOW(6)) AND canceled_at IS NULL AND queue_name IN ?", StatusPending, queues).
 		Order("priority DESC, next_run_at ASC, id ASC").
 		Limit(1).
 		Take(&t).Error
@@ -267,6 +267,30 @@ func (s *Store) CompleteTask(ctx context.Context, id string) error {
 		"lease_expires_at": nil,
 		"worker_id":        nil,
 		"updated_at":       now,
+	}).Error
+}
+
+// PauseTask sets paused_until to the provided time. While paused, the task will not be leased.
+func (s *Store) PauseTask(ctx context.Context, id string, until time.Time) error {
+	return s.DB.WithContext(ctx).Model(&Task{}).Where("id = ?", id).Updates(map[string]any{
+		"paused_until": until.UTC(),
+		"updated_at":   time.Now().UTC(),
+	}).Error
+}
+
+// ResumeTask clears paused_until, making the task eligible for leasing when due.
+func (s *Store) ResumeTask(ctx context.Context, id string) error {
+	return s.DB.WithContext(ctx).Model(&Task{}).Where("id = ?", id).Updates(map[string]any{
+		"paused_until": nil,
+		"updated_at":   time.Now().UTC(),
+	}).Error
+}
+
+// CancelTask marks the task as canceled; canceled tasks are excluded from leasing.
+func (s *Store) CancelTask(ctx context.Context, id string) error {
+	return s.DB.WithContext(ctx).Model(&Task{}).Where("id = ?", id).Updates(map[string]any{
+		"canceled_at": time.Now().UTC(),
+		"updated_at":  time.Now().UTC(),
 	}).Error
 }
 

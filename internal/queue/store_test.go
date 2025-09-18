@@ -49,6 +49,77 @@ func setupTestStore(t *testing.T) *Store {
 	return store
 }
 
+func TestPauseResumeAffectsLeasing(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	// Register worker
+	if err := store.RegisterWorker(ctx, "w1"); err != nil {
+		t.Fatalf("register worker w1 failed: %v", err)
+	}
+
+	// Enqueue in dedicated control queue
+	tCtl, err := store.Enqueue(ctx, "type.ctrl", map[string]any{"n": 1}, WithQueueName("qctl"))
+	if err != nil {
+		t.Fatalf("enqueue ctl failed: %v", err)
+	}
+
+	// Pause for 10 minutes
+	until := time.Now().UTC().Add(10 * time.Minute)
+	if err := store.PauseTask(ctx, tCtl.ID, until); err != nil {
+		t.Fatalf("pause task failed: %v", err)
+	}
+
+	// Should not lease while paused
+	_, err = store.FetchAndLeaseFromQueues(ctx, "w1", 10*time.Second, []string{"qctl"})
+	if err == nil {
+		t.Fatalf("expected no rows while paused, got task")
+	}
+	if err != sql.ErrNoRows {
+		t.Fatalf("expected sql.ErrNoRows while paused, got %T %v", err, err)
+	}
+
+	// Resume and lease should succeed
+	if err := store.ResumeTask(ctx, tCtl.ID); err != nil {
+		t.Fatalf("resume task failed: %v", err)
+	}
+	leased, err := store.FetchAndLeaseFromQueues(ctx, "w1", 10*time.Second, []string{"qctl"})
+	if err != nil {
+		t.Fatalf("lease after resume failed: %v", err)
+	}
+	if leased == nil || leased.ID != tCtl.ID {
+		t.Fatalf("leased wrong task after resume: got %+v want ID=%s", leased, tCtl.ID)
+	}
+}
+
+func TestCancelAffectsLeasing(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	// Register worker
+	if err := store.RegisterWorker(ctx, "w1"); err != nil {
+		t.Fatalf("register worker w1 failed: %v", err)
+	}
+
+	// Enqueue and immediately cancel
+	tCtl, err := store.Enqueue(ctx, "type.ctrl2", map[string]any{"n": 2}, WithQueueName("qctl2"))
+	if err != nil {
+		t.Fatalf("enqueue ctl2 failed: %v", err)
+	}
+	if err := store.CancelTask(ctx, tCtl.ID); err != nil {
+		t.Fatalf("cancel task failed: %v", err)
+	}
+
+	// Should not lease canceled tasks
+	_, err = store.FetchAndLeaseFromQueues(ctx, "w1", 10*time.Second, []string{"qctl2"})
+	if err == nil {
+		t.Fatalf("expected no rows for canceled task, got task")
+	}
+	if err != sql.ErrNoRows {
+		t.Fatalf("expected sql.ErrNoRows for canceled task, got %T %v", err, err)
+	}
+}
+
 func TestEnqueueWithQueueName(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
