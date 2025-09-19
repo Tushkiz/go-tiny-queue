@@ -423,6 +423,25 @@ func (s *Store) ListTasks(ctx context.Context, status string, limit int) ([]Task
 	return tasks, nil
 }
 
+// ListTasksFiltered returns tasks filtered by status and optional queue_name up to limit
+func (s *Store) ListTasksFiltered(ctx context.Context, status string, queueName string, limit int) ([]Task, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	q := s.DB.WithContext(ctx).Model(&Task{})
+	if status != "" && status != "all" {
+		q = q.Where("status = ?", status)
+	}
+	if queueName != "" {
+		q = q.Where("queue_name = ?", queueName)
+	}
+	var tasks []Task
+	if err := q.Order("updated_at DESC").Limit(limit).Find(&tasks).Error; err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
 // RegisterWorker registers a worker and returns its ID
 func (s *Store) RegisterWorker(ctx context.Context, id string) error {
 	now := time.Now().UTC()

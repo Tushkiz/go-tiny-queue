@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -28,6 +31,7 @@ func main() {
 	if queuesStr == "" {
 		queuesStr = util.Getenv("WORKER_QUEUES", "")
 	}
+
 	var queues []string
 	for _, part := range strings.Split(queuesStr, ",") {
 		q := strings.TrimSpace(part)
@@ -84,6 +88,7 @@ func main() {
 	defer stopReclaimer()
 
 	fmt.Println("worker: starting, visibility timeout =", vis, "workerID=", workerID)
+	adminURL := util.Getenv("ADMIN_API_URL", "")
 
 	reg := worker.DefaultRegistry()
 	baseBackoff := 5 * time.Second
@@ -114,6 +119,12 @@ func main() {
 		}
 
 		metrics.Default.IncLeased()
+		if adminURL != "" {
+			_ = publishEvent(ctx, adminURL, t.ID, "info", "leased", "task leased", map[string]any{
+				"queue_name": t.QueueName,
+				"attempt":    t.Attempt,
+			})
+		}
 
 		fmt.Printf(
 			"worker leased task:\n"+
@@ -156,7 +167,10 @@ func main() {
 		_ = json.Unmarshal(payloadBytes, &tmp)
 
 		// Run handler
-		err = handler(ctx, payloadBytes)
+		if adminURL != "" {
+			_ = publishEvent(ctx, adminURL, t.ID, "info", "handler_started", "handler started", nil)
+		}
+		err = handler(taskCtx, payloadBytes)
 
 		// Stop extender before updating DB
 		close(done)
@@ -169,6 +183,12 @@ func main() {
 			if ferr != nil {
 				fmt.Println("worker: fail/reschedule error: ", ferr)
 				continue
+			}
+			if adminURL != "" {
+				_ = publishEvent(ctx, adminURL, t.ID, "error", "failed", "handler error", map[string]any{
+					"error": err.Error(),
+					"dead":  dead,
+				})
 			}
 			if dead {
 				fmt.Printf("worker: task moved to DLQ id=%s\n", t.ID)
@@ -184,6 +204,9 @@ func main() {
 			continue
 		}
 		metrics.Default.IncCompleted()
+		if adminURL != "" {
+			_ = publishEvent(ctx, adminURL, t.ID, "info", "completed", "task completed", nil)
+		}
 
 		fmt.Printf("worker: completed task id=%s\n", t.ID)
 	}
@@ -279,4 +302,38 @@ func startReclaimer(ctx context.Context, store *queue.Store, staleAfter, every t
         }
     }()
     return cancel
+}
+
+// publishEvent sends a task-level event to the Admin API if configured.
+func publishEvent(ctx context.Context, adminBaseURL, taskID, level, kind, message string, data map[string]any) error {
+    if adminBaseURL == "" {
+        return nil
+    }
+    payload := map[string]any{
+        "level":   level,
+        "kind":    kind,
+        "message": message,
+        "data":    data,
+    }
+    b, err := json.Marshal(payload)
+    if err != nil {
+        return err
+    }
+    url := strings.TrimRight(adminBaseURL, "/") + "/api/tasks/" + taskID + "/events"
+    req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
+    if err != nil {
+        return err
+    }
+    req.Header.Set("Content-Type", "application/json")
+    client := &http.Client{Timeout: 3 * time.Second}
+    resp, err := client.Do(req)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+    _, _ = io.Copy(io.Discard, resp.Body)
+    if resp.StatusCode >= 300 {
+        return fmt.Errorf("publishEvent status=%d", resp.StatusCode)
+    }
+    return nil
 }
